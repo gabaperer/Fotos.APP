@@ -186,6 +186,21 @@ def inject_hidden_geolocation_collector() -> None:
                     return;
                 }
 
+                function patchCameraInputs(doc) {
+                    if (!doc) {
+                        return;
+                    }
+                    // O app usa file_uploader (nao camera_input) para captura: isso aciona o
+                    // app de camera NATIVO do aparelho (mesma qualidade/foco/HDR do app de
+                    // fotos nativo), evitando o stream de video de baixa qualidade do
+                    // getUserMedia e a instabilidade de trocar sozinho para a camera frontal.
+                    const fileInputs = doc.querySelectorAll('input[type="file"]');
+                    fileInputs.forEach((input) => {
+                        input.setAttribute("capture", "environment");
+                        input.setAttribute("accept", "image/*");
+                    });
+                }
+
                 function tuneInputBehavior() {
                     const numericLabels = [
                         "Numero de Repeticoes",
@@ -211,278 +226,17 @@ def inject_hidden_geolocation_collector() -> None:
                         }
                     });
 
-                    function patchCameraInputs(doc) {
-                        if (!doc) {
-                            return;
-                        }
-
-                        const fileInputs = doc.querySelectorAll('input[type="file"]');
-                        fileInputs.forEach((input) => {
-                            const accept = (input.getAttribute("accept") || "").toLowerCase();
-                            if (!accept.includes("image")) {
-                                return;
-                            }
-
-                            input.setAttribute("capture", "environment");
-                            input.setAttribute("accept", "image/*");
-                        });
-                    }
-
                     patchCameraInputs(parentWin.document);
                     patchCameraInputs(document);
                 }
 
-                function isFrontStream(stream) {
-                    const track = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-                    if (!track) {
-                        return false;
-                    }
-                    const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
-                    const label = (track.label || "").toLowerCase();
-                    const facingMode = String(settings.facingMode || "").toLowerCase();
-                    if (facingMode === "environment") {
-                        return false;
-                    }
-                    if (facingMode === "user") {
-                        return true;
-                    }
-                    return /front|frontal|face/.test(label) && !/back|rear|traseira/.test(label);
-                }
-
-                function applyQualityConstraints(track) {
-                    if (!track || typeof track.getCapabilities !== "function") {
-                        return;
-                    }
-                    try {
-                        const caps = track.getCapabilities();
-                        const advanced = [];
-
-                        if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
-                            advanced.push({ focusMode: "continuous" });
-                        }
-                        // Nao forcar zoom: em celulares com multiplas lentes, zoom minimo pode
-                        // trocar para a lente ultra-wide, piorando foco de perto e gerando distorcao.
-                        if (advanced.length) {
-                            track.applyConstraints({ advanced }).catch(() => {});
-                        }
-                    } catch (e) {
-                        // Alguns navegadores nao expõem capabilities completas.
-                    }
-                }
-
-                async function requestRearStream(targetWin, originalGetUserMedia, hintDeviceId) {
-                    const attempts = [];
-                    if (hintDeviceId) {
-                        attempts.push({ video: { deviceId: { exact: hintDeviceId } } });
-                    }
-                    attempts.push({ video: { facingMode: { exact: "environment" } } });
-                    attempts.push({ video: { facingMode: { ideal: "environment" } } });
-
-                    for (const attemptConstraints of attempts) {
-                        try {
-                            return await originalGetUserMedia(attemptConstraints);
-                        } catch (err) {
-                            // Tenta a proxima estrategia.
-                        }
-                    }
-                    return null;
-                }
-
-                function patchMediaConstraints(targetWin) {
-                    if (!targetWin || targetWin.__fotoAppMediaPatch) {
-                        return;
-                    }
-                    if (!targetWin.navigator?.mediaDevices?.getUserMedia) {
-                        return;
-                    }
-
-                    const originalGetUserMedia = targetWin.navigator.mediaDevices.getUserMedia.bind(
-                        targetWin.navigator.mediaDevices
-                    );
-                    targetWin.__fotoAppOriginalGetUserMedia = originalGetUserMedia;
-
-                    // Alguns navegadores (ex.: certos WebViews/iOS) expoem getUserMedia como
-                    // propriedade somente-leitura; sem o try/catch, essa atribuicao lancaria
-                    // um erro sincrono que interromperia todo o restante do script (inclusive
-                    // a solicitacao de geolocalizacao mais abaixo).
-                    try {
-                        targetWin.navigator.mediaDevices.getUserMedia = async function(constraints) {
-                            let patched = constraints;
-                            if (constraints && typeof constraints === "object" && constraints.video) {
-                                const baseVideo = constraints.video === true ? {} : constraints.video;
-                                if (typeof baseVideo === "object") {
-                                    patched = { ...constraints, video: { ...baseVideo } };
-                                    if (!patched.video.facingMode) {
-                                        patched.video.facingMode = { ideal: "environment" };
-                                    }
-                                }
-                            }
-
-                            const stream = await originalGetUserMedia(patched);
-                            const track = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-                            applyQualityConstraints(track);
-                            return stream;
-                        };
-                        targetWin.__fotoAppMediaPatch = true;
-                    } catch (e) {
-                        // Navegador nao permite sobrescrever getUserMedia; seguimos sem o patch.
-                    }
-                }
-
-                async function enforceRearCameraOnVideos(targetWin) {
-                    const originalGetUserMedia = targetWin.__fotoAppOriginalGetUserMedia;
-                    if (!originalGetUserMedia) {
-                        return;
-                    }
-
-                    const videos = Array.from(targetWin.document.querySelectorAll("video"));
-                    for (const video of videos) {
-                        const stream = video.srcObject;
-                        if (!stream || typeof stream.getVideoTracks !== "function") {
-                            continue;
-                        }
-                        const tracks = stream.getVideoTracks();
-                        if (!tracks.length) {
-                            continue;
-                        }
-
-                        if (!isFrontStream(stream)) {
-                            if (video.dataset.fotoAppQualityApplied !== "1") {
-                                video.dataset.fotoAppQualityApplied = "1";
-                                applyQualityConstraints(tracks[0]);
-                            }
-                            continue;
-                        }
-
-                        if (video.dataset.fotoAppRearSwap === "1") {
-                            continue;
-                        }
-                        video.dataset.fotoAppRearSwap = "1";
-
-                        const devices = await targetWin.navigator.mediaDevices
-                            .enumerateDevices()
-                            .catch(() => []);
-                        const rearDevice = devices.find(
-                            (d) =>
-                                d.kind === "videoinput" &&
-                                /back|rear|traseira|environment/i.test(d.label || "")
-                        );
-
-                        const rearStream = await requestRearStream(
-                            targetWin,
-                            originalGetUserMedia,
-                            rearDevice ? rearDevice.deviceId : null
-                        );
-
-                        if (rearStream && !isFrontStream(rearStream)) {
-                            tracks.forEach((t) => t.stop());
-                            video.srcObject = rearStream;
-                            applyQualityConstraints(rearStream.getVideoTracks()[0]);
-                        } else if (rearStream) {
-                            rearStream.getTracks().forEach((t) => t.stop());
-                            video.dataset.fotoAppRearSwap = "0";
-                        } else {
-                            video.dataset.fotoAppRearSwap = "0";
-                        }
-                    }
-                }
-
-                function findVideoAtPoint(doc, x, y) {
-                    const videos = Array.from(doc.querySelectorAll("video"));
-                    for (const video of videos) {
-                        const rect = video.getBoundingClientRect();
-                        if (rect.width === 0 || rect.height === 0) {
-                            continue;
-                        }
-                        if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
-                            return video;
-                        }
-                    }
-                    return null;
-                }
-
-                function attachTapToFocus(targetWin) {
-                    if (targetWin.__fotoAppTapFocusAttached) {
-                        return;
-                    }
-                    targetWin.__fotoAppTapFocusAttached = true;
-
-                    // Detecta pelo ponto tocado (nao pelo alvo do evento): overlays do proprio
-                    // widget de camera podem capturar o toque antes do <video>.
-                    targetWin.document.addEventListener(
-                        "click",
-                        async (evt) => {
-                            const video = findVideoAtPoint(targetWin.document, evt.clientX, evt.clientY);
-                            if (!video || !video.srcObject) {
-                                return;
-                            }
-
-                            const track = video.srcObject.getVideoTracks
-                                ? video.srcObject.getVideoTracks()[0]
-                                : null;
-                            if (!track || typeof track.applyConstraints !== "function") {
-                                return;
-                            }
-
-                            const rect = video.getBoundingClientRect();
-                            const relX = Math.min(Math.max((evt.clientX - rect.left) / rect.width, 0), 1);
-                            const relY = Math.min(Math.max((evt.clientY - rect.top) / rect.height, 0), 1);
-
-                            const marker = targetWin.document.createElement("div");
-                            marker.style.cssText =
-                                "position:fixed;width:56px;height:56px;border:3px solid #fbbf24;" +
-                                "border-radius:50%;pointer-events:none;z-index:999999;" +
-                                "transform:translate(-50%,-50%);transition:opacity 0.4s ease;" +
-                                `left:${evt.clientX}px;top:${evt.clientY}px;`;
-                            targetWin.document.body.appendChild(marker);
-                            setTimeout(() => {
-                                marker.style.opacity = "0";
-                                setTimeout(() => marker.remove(), 400);
-                            }, 500);
-
-                            const caps =
-                                typeof track.getCapabilities === "function" ? track.getCapabilities() : {};
-                            const supportsContinuous =
-                                Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous");
-
-                            // Nunca usar "single-shot": trava o foco na primeira tentativa e pode
-                            // deixar a imagem permanentemente desfocada se o ponto falhar.
-                            try {
-                                const advanced = [{ pointsOfInterest: [{ x: relX, y: relY }] }];
-                                if (supportsContinuous) {
-                                    advanced.push({ focusMode: "continuous" });
-                                }
-                                await track.applyConstraints({ advanced });
-                            } catch (e) {
-                                if (supportsContinuous) {
-                                    try {
-                                        await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
-                                    } catch (e2) {
-                                        // Ajuste de foco por toque nao suportado neste navegador/dispositivo.
-                                    }
-                                }
-                            }
-                        },
-                        { passive: true }
-                    );
-                }
-
                 try {
-                    patchMediaConstraints(parentWin);
-                    patchMediaConstraints(window);
-                    attachTapToFocus(parentWin);
-
-                    if (!parentWin.__fotoAppRearIntervalStarted) {
-                        parentWin.__fotoAppRearIntervalStarted = true;
-                        parentWin.setInterval(() => enforceRearCameraOnVideos(parentWin), 700);
+                    if (!parentWin.__fotoAppCameraIntervalStarted) {
+                        parentWin.__fotoAppCameraIntervalStarted = true;
+                        parentWin.setInterval(() => patchCameraInputs(parentWin.document), 500);
                     }
-
-                    const rearObserver = new MutationObserver(() => {
-                        enforceRearCameraOnVideos(parentWin);
-                    });
-                    rearObserver.observe(parentWin.document.body, { childList: true, subtree: true });
                 } catch (e) {
-                    // Falha ao configurar reforco de camera traseira; nao deve bloquear o resto do script.
+                    // Falha ao configurar reforco do input de camera; nao deve bloquear o resto do script.
                 }
 
                 tuneInputBehavior();
@@ -753,10 +507,19 @@ def sanitize_token(text: str, fallback: str) -> str:
     return cleaned or fallback
 
 
-def photo_filename(item: dict, index: int) -> str:
+def photo_filename(item: dict, index: int, mime: str = "") -> str:
+    ext_by_mime = {
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/heic": "heic",
+        "image/heif": "heif",
+    }
+    ext = ext_by_mime.get((mime or "").lower(), "jpg")
     return (
         f"{index + 1:04d}_R{item['repeticao']:02d}_"
-        f"T{item['tratamento']:02d}_P{item['parcela']:03d}_S{item['subamostra']:02d}.jpg"
+        f"T{item['tratamento']:02d}_P{item['parcela']:03d}_S{item['subamostra']:02d}.{ext}"
     )
 
 
@@ -811,7 +574,7 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
             status = "pendente"
 
             if captured:
-                archive_name = photo_filename(item, idx)
+                archive_name = photo_filename(item, idx, captured.get("mime", ""))
                 captured_at = captured.get("timestamp", "")
                 status = "capturada"
                 zf.writestr(f"fotos/{archive_name}", captured["bytes"])
@@ -1115,7 +878,13 @@ def render_capture_flow() -> None:
     else:
         # Key muda a cada item/retake para o widget nao reter a foto do item anterior.
         camera_key = f"cam_{current_idx}_{st.session_state.retake_counter}"
-        picture = st.camera_input("Capture a foto desta subamostra", key=camera_key)
+        st.caption("Toque abaixo para abrir a camera do aparelho e tirar a foto.")
+        picture = st.file_uploader(
+            "Capture a foto desta subamostra",
+            type=["jpg", "jpeg", "png", "heic", "heif", "webp"],
+            key=camera_key,
+            label_visibility="visible",
+        )
 
         if picture is not None:
             raw_image_bytes = picture.getvalue()
