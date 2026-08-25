@@ -8,6 +8,7 @@ from datetime import datetime
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ---------------------------
 # Configuracoes globais
@@ -28,13 +29,12 @@ def init_session_state() -> None:
         "cfg_repeticoes": 1,
         "cfg_tratamentos": 1,
         "cfg_subamostras": 1,
-        "cfg_latitude": "",
-        "cfg_longitude": "",
         "flow_started": False,
         "setup": {},
         "sequence": [],
         "current_idx": 0,
         "captures": {},
+        "current_location": None,
         "retake_counter": 0,
         "zip_cache": None,
         "zip_name": "",
@@ -61,8 +61,6 @@ def reset_flow(keep_config: bool = True) -> None:
         st.session_state.cfg_repeticoes = 1
         st.session_state.cfg_tratamentos = 1
         st.session_state.cfg_subamostras = 1
-        st.session_state.cfg_latitude = ""
-        st.session_state.cfg_longitude = ""
 
 
 # ---------------------------
@@ -91,12 +89,8 @@ def validate_setup(
     repeticoes: int,
     tratamentos: int,
     subamostras: int,
-    latitude_text: str,
-    longitude_text: str,
-) -> tuple[list[str], int, int, float | None, float | None]:
+) -> tuple[list[str], int, int]:
     errors = []
-    latitude = None
-    longitude = None
 
     if not ensaio.strip():
         errors.append("Preencha o campo 'Nome do Ensaio'.")
@@ -124,33 +118,111 @@ def validate_setup(
             f"Total de fotos ({total_fotos}) excede o limite configurado ({MAX_TOTAL_FOTOS})."
         )
 
-    lat_text = latitude_text.strip().replace(",", ".")
-    lon_text = longitude_text.strip().replace(",", ".")
-
-    if lat_text or lon_text:
-        if not lat_text or not lon_text:
-            errors.append("Informe latitude e longitude juntas, ou deixe ambas vazias.")
-        else:
-            try:
-                latitude = float(lat_text)
-            except ValueError:
-                errors.append("Latitude invalida. Use formato decimal, ex.: -22.123456")
-
-            try:
-                longitude = float(lon_text)
-            except ValueError:
-                errors.append("Longitude invalida. Use formato decimal, ex.: -47.123456")
-
-            if latitude is not None and not (-90.0 <= latitude <= 90.0):
-                errors.append("Latitude deve estar entre -90 e 90.")
-
-            if longitude is not None and not (-180.0 <= longitude <= 180.0):
-                errors.append("Longitude deve estar entre -180 e 180.")
-
-    return errors, total_parcelas, total_fotos, latitude, longitude
+    return errors, total_parcelas, total_fotos
 
 
-def build_photo_metadata(item: dict, latitude: float | None, longitude: float | None) -> dict:
+def _first_query_value(value: str | list[str] | None) -> str:
+    if isinstance(value, list):
+        return value[0] if value else ""
+    return value or ""
+
+
+def sync_geolocation_from_query_params() -> None:
+    lat_raw = _first_query_value(st.query_params.get("geo_lat"))
+    lon_raw = _first_query_value(st.query_params.get("geo_lon"))
+    acc_raw = _first_query_value(st.query_params.get("geo_acc"))
+    ts_raw = _first_query_value(st.query_params.get("geo_ts"))
+
+    try:
+        latitude = float(lat_raw)
+        longitude = float(lon_raw)
+    except (TypeError, ValueError):
+        return
+
+    accuracy = None
+    try:
+        accuracy = float(acc_raw)
+    except (TypeError, ValueError):
+        pass
+
+    st.session_state.current_location = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "accuracy_m": accuracy,
+        "geo_timestamp": ts_raw or datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def inject_hidden_geolocation_collector() -> None:
+    components.html(
+        """
+        <script>
+            (function() {
+                const parentWin = window.parent;
+                if (!parentWin || !navigator.geolocation) {
+                    return;
+                }
+
+                const now = Date.now();
+                const throttleKey = "foto_streamlit_geo_last_try_ms";
+                const lastTry = Number(parentWin.localStorage.getItem(throttleKey) || "0");
+
+                if (now - lastTry < 7000) {
+                    return;
+                }
+
+                parentWin.localStorage.setItem(throttleKey, String(now));
+
+                navigator.geolocation.getCurrentPosition(
+                    function(pos) {
+                        const lat = pos.coords.latitude.toFixed(7);
+                        const lon = pos.coords.longitude.toFixed(7);
+                        const acc = Math.round(pos.coords.accuracy || 0).toString();
+
+                        const url = new URL(parentWin.location.href);
+                        const oldLat = url.searchParams.get("geo_lat");
+                        const oldLon = url.searchParams.get("geo_lon");
+                        const oldAcc = url.searchParams.get("geo_acc");
+
+                        if (oldLat === lat && oldLon === lon && oldAcc === acc) {
+                            return;
+                        }
+
+                        url.searchParams.set("geo_lat", lat);
+                        url.searchParams.set("geo_lon", lon);
+                        url.searchParams.set("geo_acc", acc);
+                        url.searchParams.set("geo_ts", String(Date.now()));
+                        parentWin.location.replace(url.toString());
+                    },
+                    function() {
+                        // Sem permissao de GPS ou indisponivel no dispositivo.
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        maximumAge: 5000,
+                        timeout: 6000
+                    }
+                );
+            })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def build_photo_metadata(item: dict, location: dict | None) -> dict:
+    latitude = None
+    longitude = None
+    accuracy_m = None
+    geo_timestamp = None
+
+    if location:
+        latitude = location.get("latitude")
+        longitude = location.get("longitude")
+        accuracy_m = location.get("accuracy_m")
+        geo_timestamp = location.get("geo_timestamp")
+
     return {
         "repeticao": item["repeticao"],
         "tratamento": item["tratamento"],
@@ -158,6 +230,8 @@ def build_photo_metadata(item: dict, latitude: float | None, longitude: float | 
         "subamostra": item["subamostra"],
         "latitude": latitude,
         "longitude": longitude,
+        "accuracy_m": accuracy_m,
+        "geo_timestamp": geo_timestamp,
     }
 
 
@@ -202,6 +276,133 @@ def embed_photo_metadata(image_bytes: bytes, mime: str, photo_metadata: dict) ->
     return image_bytes
 
 
+def build_walk_geojson(points: list[dict]) -> dict:
+    features = []
+
+    if len(points) >= 2:
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[p["longitude"], p["latitude"]] for p in points],
+                },
+                "properties": {"descricao": "Caminhamento do operador"},
+            }
+        )
+
+    for p in points:
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [p["longitude"], p["latitude"]],
+                },
+                "properties": {
+                    "indice": p["indice"],
+                    "repeticao": p["repeticao"],
+                    "tratamento": p["tratamento"],
+                    "parcela": p["parcela"],
+                    "subamostra": p["subamostra"],
+                    "accuracy_m": p.get("accuracy_m"),
+                    "capturado_em": p.get("capturado_em"),
+                },
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+def build_walk_map_html(points: list[dict]) -> str:
+    if not points:
+        return """<!doctype html><html><body><h3>Sem coordenadas para mapear.</h3></body></html>"""
+
+    width = 920
+    height = 620
+    margin = 40
+
+    min_lat = min(p["latitude"] for p in points)
+    max_lat = max(p["latitude"] for p in points)
+    min_lon = min(p["longitude"] for p in points)
+    max_lon = max(p["longitude"] for p in points)
+
+    lat_span = max(max_lat - min_lat, 0.000001)
+    lon_span = max(max_lon - min_lon, 0.000001)
+
+    def project(lat: float, lon: float) -> tuple[float, float]:
+        x = margin + ((lon - min_lon) / lon_span) * (width - 2 * margin)
+        y = height - margin - ((lat - min_lat) / lat_span) * (height - 2 * margin)
+        return x, y
+
+    svg_points = []
+    point_labels = []
+    for p in points:
+        x, y = project(p["latitude"], p["longitude"])
+        svg_points.append(f"{x:.2f},{y:.2f}")
+        point_labels.append(
+            f"<circle cx='{x:.2f}' cy='{y:.2f}' r='5' fill='#dc2626' />"
+            f"<text x='{x + 8:.2f}' y='{y - 8:.2f}' font-size='12' fill='#111827'>#{p['indice']}</text>"
+        )
+
+    table_rows = []
+    for p in points:
+        table_rows.append(
+            "<tr>"
+            f"<td>{p['indice']}</td>"
+            f"<td>{p['repeticao']}</td>"
+            f"<td>{p['tratamento']}</td>"
+            f"<td>{p['parcela']}</td>"
+            f"<td>{p['subamostra']}</td>"
+            f"<td>{p['latitude']:.7f}</td>"
+            f"<td>{p['longitude']:.7f}</td>"
+            f"<td>{'' if p.get('accuracy_m') is None else p.get('accuracy_m')}</td>"
+            "</tr>"
+        )
+
+    polyline = " ".join(svg_points)
+    labels = "".join(point_labels)
+    rows = "".join(table_rows)
+
+    return f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8' />
+  <title>Mapa de Caminhamento</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 16px; }}
+    h2 {{ margin-bottom: 8px; }}
+    .card {{ border: 1px solid #d1d5db; border-radius: 12px; padding: 12px; }}
+    table {{ border-collapse: collapse; width: 100%; margin-top: 16px; font-size: 13px; }}
+    th, td {{ border: 1px solid #d1d5db; padding: 6px; text-align: center; }}
+    th {{ background: #f3f4f6; }}
+  </style>
+</head>
+<body>
+  <h2>Mapa de Caminhamento (GPS das fotos)</h2>
+  <div class='card'>
+    <svg width='{width}' height='{height}' viewBox='0 0 {width} {height}' role='img' aria-label='Mapa de caminhamento'>
+      <rect x='1' y='1' width='{width - 2}' height='{height - 2}' fill='#ffffff' stroke='#d1d5db' />
+      <polyline points='{polyline}' fill='none' stroke='#2563eb' stroke-width='2.5' />
+      {labels}
+    </svg>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>Rep</th><th>Trat</th><th>Parcela</th><th>Sub</th><th>Latitude</th><th>Longitude</th><th>Precisao (m)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {rows}
+    </tbody>
+  </table>
+</body>
+</html>
+"""
+
+
 def sanitize_token(text: str, fallback: str) -> str:
     normalized = unicodedata.normalize("NFKD", text)
     ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
@@ -230,14 +431,14 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
             "repeticoes": setup["repeticoes"],
             "tratamentos": setup["tratamentos"],
             "subamostras": setup["subamostras"],
-            "latitude": setup.get("latitude"),
-            "longitude": setup.get("longitude"),
             "total_itens": len(sequence),
             "fotos_capturadas": len(captures),
             "gerado_em": datetime.now().isoformat(timespec="seconds"),
             "ordem": ["repeticao", "tratamento", "subamostra"],
         }
         zf.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2))
+
+        walk_points = []
 
         manifest_stream = io.StringIO()
         writer = csv.DictWriter(
@@ -253,6 +454,8 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
                 "capturado_em",
                 "latitude",
                 "longitude",
+                "accuracy_m",
+                "geo_timestamp",
             ],
         )
         writer.writeheader()
@@ -275,6 +478,23 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
                 )
 
             photo_meta = captured.get("metadata", {}) if captured else {}
+            lat = photo_meta.get("latitude")
+            lon = photo_meta.get("longitude")
+
+            if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                walk_points.append(
+                    {
+                        "indice": idx + 1,
+                        "repeticao": item["repeticao"],
+                        "tratamento": item["tratamento"],
+                        "parcela": item["parcela"],
+                        "subamostra": item["subamostra"],
+                        "latitude": lat,
+                        "longitude": lon,
+                        "accuracy_m": photo_meta.get("accuracy_m"),
+                        "capturado_em": captured_at,
+                    }
+                )
 
             writer.writerow(
                 {
@@ -288,10 +508,17 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
                     "capturado_em": captured_at,
                     "latitude": photo_meta.get("latitude"),
                     "longitude": photo_meta.get("longitude"),
+                    "accuracy_m": photo_meta.get("accuracy_m"),
+                    "geo_timestamp": photo_meta.get("geo_timestamp"),
                 }
             )
 
         zf.writestr("manifesto.csv", manifest_stream.getvalue().encode("utf-8"))
+        zf.writestr(
+            "caminhamento/pontos_captura.geojson",
+            json.dumps(build_walk_geojson(walk_points), ensure_ascii=False, indent=2),
+        )
+        zf.writestr("caminhamento/mapa_caminhamento.html", build_walk_map_html(walk_points))
 
     zip_buffer.seek(0)
     return zip_buffer.getvalue(), zip_name
@@ -413,38 +640,18 @@ def render_setup_form() -> None:
             )
         )
 
-        lat_col, lon_col = st.columns(2)
-        with lat_col:
-            latitude_text = st.text_input(
-                "Latitude (opcional)",
-                key="cfg_latitude",
-                placeholder="-22.123456",
-            )
-        with lon_col:
-            longitude_text = st.text_input(
-                "Longitude (opcional)",
-                key="cfg_longitude",
-                placeholder="-47.123456",
-            )
-
-        errors, total_parcelas, total_fotos, latitude, longitude = validate_setup(
+        errors, total_parcelas, total_fotos = validate_setup(
             ensaio=ensaio,
             alvo=alvo,
             repeticoes=repeticoes,
             tratamentos=tratamentos,
             subamostras=subamostras,
-            latitude_text=latitude_text,
-            longitude_text=longitude_text,
         )
 
         st.markdown("**Resumo antes de gerar**")
         st.write(f"Parcelas: {total_parcelas}")
         st.write(f"Total de fotos: {total_fotos}")
         st.write("Ordem de percurso: repeticao -> tratamento -> subamostra")
-        if latitude is not None and longitude is not None:
-            st.write(f"Coordenadas no metadata: lat {latitude:.6f}, lon {longitude:.6f}")
-        else:
-            st.write("Coordenadas no metadata: nao informadas")
 
         if errors:
             for err in errors:
@@ -465,8 +672,6 @@ def render_setup_form() -> None:
             "repeticoes": repeticoes,
             "tratamentos": tratamentos,
             "subamostras": subamostras,
-            "latitude": latitude,
-            "longitude": longitude,
         }
         st.session_state.sequence = build_sequence(repeticoes, tratamentos, subamostras)
         st.session_state.current_idx = 0
@@ -491,7 +696,6 @@ def render_capture_flow() -> None:
         '<div class="progress-card">'
         f"<b>Ensaio:</b> {setup['ensaio']}<br>"
         f"<b>Alvo:</b> {setup['alvo']}<br>"
-        f"<b>Coordenadas:</b> {setup.get('latitude')}, {setup.get('longitude')}<br>"
         f"<b>Fotos confirmadas:</b> {len(captures)} de {total}"
         "</div>",
         unsafe_allow_html=True,
@@ -560,8 +764,7 @@ def render_capture_flow() -> None:
             raw_image_bytes = picture.getvalue()
             photo_metadata = build_photo_metadata(
                 item=item,
-                latitude=setup.get("latitude"),
-                longitude=setup.get("longitude"),
+                location=st.session_state.current_location,
             )
             image_bytes = embed_photo_metadata(raw_image_bytes, picture.type or "", photo_metadata)
             st.image(raw_image_bytes, caption="Pre-visualizacao", use_container_width=True)
@@ -610,6 +813,8 @@ def main() -> None:
     )
     inject_mobile_styles()
     init_session_state()
+    sync_geolocation_from_query_params()
+    inject_hidden_geolocation_collector()
 
     st.title("Coletor Sequencial de Fotos de Campo")
     st.caption(
