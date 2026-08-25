@@ -123,6 +123,11 @@ def validate_setup(
     return errors, total_parcelas, total_fotos
 
 
+def force_uppercase_field(field_key: str) -> None:
+    value = st.session_state.get(field_key, "")
+    st.session_state[field_key] = value.upper()
+
+
 def _first_query_value(value: str | list[str] | None) -> str:
     if isinstance(value, list):
         return value[0] if value else ""
@@ -161,7 +166,83 @@ def inject_hidden_geolocation_collector() -> None:
         <script>
             (function() {
                 const parentWin = window.parent;
-                if (!parentWin || !navigator.geolocation) {
+                if (!parentWin) {
+                    return;
+                }
+
+                function tuneInputBehavior() {
+                    const numericLabels = [
+                        "Numero de Repeticoes",
+                        "Numero de Tratamentos",
+                        "Numero de Subamostras por parcela"
+                    ];
+
+                    numericLabels.forEach((label) => {
+                        const el = parentWin.document.querySelector(`input[aria-label="${label}"]`);
+                        if (el) {
+                            el.setAttribute("inputmode", "numeric");
+                            el.setAttribute("pattern", "[0-9]*");
+                            el.setAttribute("enterkeyhint", "done");
+                        }
+                    });
+
+                    const upperLabels = ["Nome do Ensaio", "Praga / Alvo Avaliado"];
+                    upperLabels.forEach((label) => {
+                        const el = parentWin.document.querySelector(`input[aria-label="${label}"]`);
+                        if (el) {
+                            el.setAttribute("autocapitalize", "characters");
+                            el.style.textTransform = "uppercase";
+                        }
+                    });
+                }
+
+                function patchMediaConstraints(targetWin) {
+                    if (!targetWin || targetWin.__fotoAppMediaPatch) {
+                        return;
+                    }
+                    if (!targetWin.navigator?.mediaDevices?.getUserMedia) {
+                        return;
+                    }
+
+                    targetWin.__fotoAppMediaPatch = true;
+                    const originalGetUserMedia = targetWin.navigator.mediaDevices.getUserMedia.bind(
+                        targetWin.navigator.mediaDevices
+                    );
+
+                    targetWin.navigator.mediaDevices.getUserMedia = function(constraints) {
+                        let patched = constraints;
+                        if (constraints && typeof constraints === "object" && constraints.video) {
+                            const baseVideo = constraints.video === true ? {} : constraints.video;
+                            if (typeof baseVideo === "object") {
+                                patched = { ...constraints, video: { ...baseVideo } };
+
+                                if (!patched.video.facingMode) {
+                                    patched.video.facingMode = { ideal: "environment" };
+                                }
+                                if (!patched.video.width) {
+                                    patched.video.width = { ideal: 4096 };
+                                }
+                                if (!patched.video.height) {
+                                    patched.video.height = { ideal: 2160 };
+                                }
+                                if (!patched.video.aspectRatio) {
+                                    patched.video.aspectRatio = { ideal: 1.3333333333 };
+                                }
+                            }
+                        }
+                        return originalGetUserMedia(patched);
+                    };
+                }
+
+                patchMediaConstraints(parentWin);
+                patchMediaConstraints(window);
+
+                tuneInputBehavior();
+                for (let i = 1; i <= 12; i += 1) {
+                    setTimeout(tuneInputBehavior, i * 350);
+                }
+
+                if (!navigator.geolocation) {
                     return;
                 }
 
@@ -614,8 +695,30 @@ def inject_mobile_styles() -> None:
 def render_setup_form() -> None:
     st.header("1) Configuracao inicial")
 
-    ensaio = st.text_input("Nome do Ensaio", key="cfg_ensaio")
-    alvo = st.text_input("Praga / Alvo Avaliado", key="cfg_alvo")
+    ensaio = st.text_input(
+        "Nome do Ensaio",
+        key="cfg_ensaio",
+        on_change=force_uppercase_field,
+        args=("cfg_ensaio",),
+    )
+    alvo = st.text_input(
+        "Praga / Alvo Avaliado",
+        key="cfg_alvo",
+        on_change=force_uppercase_field,
+        args=("cfg_alvo",),
+    )
+
+    ensaio_up = ensaio.upper()
+    alvo_up = alvo.upper()
+    if ensaio != ensaio_up:
+        st.session_state.cfg_ensaio = ensaio_up
+        st.rerun()
+    if alvo != alvo_up:
+        st.session_state.cfg_alvo = alvo_up
+        st.rerun()
+
+    ensaio = ensaio_up
+    alvo = alvo_up
 
     repeticoes = int(
         st.number_input(
@@ -667,12 +770,18 @@ def render_setup_form() -> None:
     st.caption("Dados validos. Iniciando coleta automaticamente...")
 
     config_signature = "|".join(
-        [ensaio.strip(), alvo.strip(), str(repeticoes), str(tratamentos), str(subamostras)]
+        [
+            ensaio.strip().upper(),
+            alvo.strip().upper(),
+            str(repeticoes),
+            str(tratamentos),
+            str(subamostras),
+        ]
     )
     if st.session_state.auto_started_signature != config_signature:
         st.session_state.setup = {
-            "ensaio": ensaio.strip(),
-            "alvo": alvo.strip(),
+            "ensaio": ensaio.strip().upper(),
+            "alvo": alvo.strip().upper(),
             "repeticoes": repeticoes,
             "tratamentos": tratamentos,
             "subamostras": subamostras,
