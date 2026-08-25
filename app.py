@@ -194,6 +194,26 @@ def inject_hidden_geolocation_collector() -> None:
                             el.style.textTransform = "uppercase";
                         }
                     });
+
+                    function patchCameraInputs(doc) {
+                        if (!doc) {
+                            return;
+                        }
+
+                        const fileInputs = doc.querySelectorAll('input[type="file"]');
+                        fileInputs.forEach((input) => {
+                            const accept = (input.getAttribute("accept") || "").toLowerCase();
+                            if (!accept.includes("image")) {
+                                return;
+                            }
+
+                            input.setAttribute("capture", "environment");
+                            input.setAttribute("accept", "image/*");
+                        });
+                    }
+
+                    patchCameraInputs(parentWin.document);
+                    patchCameraInputs(document);
                 }
 
                 function patchMediaConstraints(targetWin) {
