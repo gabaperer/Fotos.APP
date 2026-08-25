@@ -208,23 +208,36 @@ def inject_mobile_styles() -> None:
     st.markdown(
         """
         <style>
+            :root {
+                --card-bg: #f9fcfa;
+                --card-border: #dce8e1;
+                --form-bg: #fbfcfb;
+                --form-border: #d7dfd8;
+                --cta-bg: #0e7490;
+                --cta-fg: #ffffff;
+                --cta-border: #0e7490;
+            }
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --card-bg: #1f2937;
+                    --card-border: #4b5563;
+                    --form-bg: #111827;
+                    --form-border: #4b5563;
+                    --cta-bg: #38bdf8;
+                    --cta-fg: #0b1220;
+                    --cta-border: #38bdf8;
+                }
+            }
             .block-container {
                 max-width: 760px;
                 padding-top: 1rem;
                 padding-bottom: 4rem;
             }
-            .app-card {
-                border: 1px solid #d9e2da;
-                background: linear-gradient(180deg, #f7fbf8 0%, #ffffff 100%);
-                border-radius: 16px;
-                padding: 1rem;
-                margin-bottom: 1rem;
-            }
             .progress-card {
-                border: 1px solid #dce8e1;
+                border: 1px solid var(--card-border);
                 border-radius: 14px;
                 padding: 0.9rem;
-                background: #f9fcfa;
+                background: var(--card-bg);
                 margin-bottom: 0.8rem;
             }
             .stButton > button,
@@ -234,11 +247,24 @@ def inject_mobile_styles() -> None:
                 font-size: 1.02rem;
                 border-radius: 12px;
             }
+            [data-testid="stFormSubmitButton"] button {
+                min-height: 3.2rem;
+                width: 100%;
+                border-radius: 12px;
+                border: 1px solid var(--cta-border);
+                background: var(--cta-bg);
+                color: var(--cta-fg);
+                font-weight: 700;
+            }
+            [data-testid="stFormSubmitButton"] button:disabled {
+                opacity: 0.7;
+                border-style: dashed;
+            }
             [data-testid="stForm"] {
-                border: 1px solid #d7dfd8;
+                border: 1px solid var(--form-border);
                 border-radius: 14px;
                 padding: 1rem;
-                background-color: #fbfcfb;
+                background-color: var(--form-bg);
             }
             @media (max-width: 640px) {
                 h1 {font-size: 1.6rem;}
@@ -308,10 +334,12 @@ def render_setup_form() -> None:
             for err in errors:
                 st.error(err)
 
+        st.caption("Preencha os campos e toque em 'Gerar Sequencia de Campo' para iniciar.")
+
         submitted = st.form_submit_button(
             "Gerar Sequencia de Campo",
             type="primary",
-            disabled=bool(errors),
+            use_container_width=True,
         )
 
     if submitted and not errors:
