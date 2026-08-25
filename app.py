@@ -312,35 +312,43 @@ def inject_hidden_geolocation_collector() -> None:
                         return;
                     }
 
-                    targetWin.__fotoAppMediaPatch = true;
                     const originalGetUserMedia = targetWin.navigator.mediaDevices.getUserMedia.bind(
                         targetWin.navigator.mediaDevices
                     );
                     targetWin.__fotoAppOriginalGetUserMedia = originalGetUserMedia;
 
-                    targetWin.navigator.mediaDevices.getUserMedia = async function(constraints) {
-                        let patched = constraints;
-                        if (constraints && typeof constraints === "object" && constraints.video) {
-                            const baseVideo = constraints.video === true ? {} : constraints.video;
-                            if (typeof baseVideo === "object") {
-                                patched = { ...constraints, video: { ...baseVideo } };
-                                if (!patched.video.facingMode) {
-                                    patched.video.facingMode = { ideal: "environment" };
-                                }
-                                if (!patched.video.width) {
-                                    patched.video.width = { ideal: 4096 };
-                                }
-                                if (!patched.video.height) {
-                                    patched.video.height = { ideal: 3072 };
+                    // Alguns navegadores (ex.: certos WebViews/iOS) expoem getUserMedia como
+                    // propriedade somente-leitura; sem o try/catch, essa atribuicao lancaria
+                    // um erro sincrono que interromperia todo o restante do script (inclusive
+                    // a solicitacao de geolocalizacao mais abaixo).
+                    try {
+                        targetWin.navigator.mediaDevices.getUserMedia = async function(constraints) {
+                            let patched = constraints;
+                            if (constraints && typeof constraints === "object" && constraints.video) {
+                                const baseVideo = constraints.video === true ? {} : constraints.video;
+                                if (typeof baseVideo === "object") {
+                                    patched = { ...constraints, video: { ...baseVideo } };
+                                    if (!patched.video.facingMode) {
+                                        patched.video.facingMode = { ideal: "environment" };
+                                    }
+                                    if (!patched.video.width) {
+                                        patched.video.width = { ideal: 4096 };
+                                    }
+                                    if (!patched.video.height) {
+                                        patched.video.height = { ideal: 3072 };
+                                    }
                                 }
                             }
-                        }
 
-                        const stream = await originalGetUserMedia(patched);
-                        const track = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-                        applyQualityConstraints(track);
-                        return stream;
-                    };
+                            const stream = await originalGetUserMedia(patched);
+                            const track = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+                            applyQualityConstraints(track);
+                            return stream;
+                        };
+                        targetWin.__fotoAppMediaPatch = true;
+                    } catch (e) {
+                        // Navegador nao permite sobrescrever getUserMedia; seguimos sem o patch.
+                    }
                 }
 
                 async function enforceRearCameraOnVideos(targetWin) {
@@ -401,20 +409,20 @@ def inject_hidden_geolocation_collector() -> None:
                     }
                 }
 
-                patchMediaConstraints(parentWin);
-                patchMediaConstraints(window);
-
-                for (let i = 0; i < 20; i += 1) {
-                    setTimeout(() => enforceRearCameraOnVideos(parentWin), i * 500);
-                }
-
                 try {
+                    patchMediaConstraints(parentWin);
+                    patchMediaConstraints(window);
+
+                    for (let i = 0; i < 20; i += 1) {
+                        setTimeout(() => enforceRearCameraOnVideos(parentWin), i * 500);
+                    }
+
                     const rearObserver = new MutationObserver(() => {
                         enforceRearCameraOnVideos(parentWin);
                     });
                     rearObserver.observe(parentWin.document.body, { childList: true, subtree: true });
                 } catch (e) {
-                    // MutationObserver indisponivel neste contexto.
+                    // Falha ao configurar reforco de camera traseira; nao deve bloquear o resto do script.
                 }
 
                 tuneInputBehavior();
