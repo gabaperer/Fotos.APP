@@ -788,25 +788,25 @@ def render_setup_form() -> None:
         subamostras=subamostras,
     )
 
-    st.markdown("**Resumo automatico**")
-    st.write(f"Parcelas: {total_parcelas}")
-    st.write(f"Total de fotos: {total_fotos}")
-    st.write("Ordem de percurso: repeticao -> tratamento -> subamostra")
-
-    if errors:
-        for err in errors:
-            st.error(err)
-
-    start_col_info, start_col_btn = st.columns([2, 1])
-    with start_col_info:
-        st.caption("A coleta so inicia quando voce tocar em 'Iniciar avaliacao'.")
-    with start_col_btn:
+    summary_col_info, summary_col_btn = st.columns([2, 1])
+    with summary_col_info:
+        st.markdown("**Resumo automatico**")
+    with summary_col_btn:
         should_start = st.button(
             "Iniciar avaliacao",
             type="primary",
             disabled=bool(errors),
             use_container_width=True,
         )
+
+    st.write(f"Parcelas: {total_parcelas}")
+    st.write(f"Total de fotos: {total_fotos}")
+    st.write("Ordem de percurso: repeticao -> tratamento -> subamostra")
+    st.caption("A coleta so inicia quando voce tocar em 'Iniciar avaliacao'.")
+
+    if errors:
+        for err in errors:
+            st.error(err)
 
     if should_start and not errors:
         st.session_state.setup = {
