@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import json
 import re
@@ -35,6 +36,7 @@ def init_session_state() -> None:
         "sequence": [],
         "current_idx": 0,
         "captures": {},
+        "camera_last_consumed_sig": "",
         "current_location": None,
         "retake_counter": 0,
         "zip_cache": None,
@@ -53,6 +55,7 @@ def reset_flow(keep_config: bool = True) -> None:
     st.session_state.sequence = []
     st.session_state.current_idx = 0
     st.session_state.captures = {}
+    st.session_state.camera_last_consumed_sig = ""
     st.session_state.retake_counter = 0
     st.session_state.zip_cache = None
     st.session_state.zip_name = ""
@@ -901,6 +904,7 @@ def render_setup_form() -> None:
         st.session_state.sequence = build_sequence(repeticoes, tratamentos, subamostras)
         st.session_state.current_idx = 0
         st.session_state.captures = {}
+        st.session_state.camera_last_consumed_sig = ""
         st.session_state.retake_counter = 0
         st.session_state.zip_cache = None
         st.session_state.zip_name = ""
@@ -965,36 +969,39 @@ def render_capture_flow() -> None:
             if st.button("Refazer foto atual"):
                 del st.session_state.captures[item_key]
                 st.session_state.zip_cache = None
-                st.session_state.retake_counter += 1
                 st.rerun()
         with col_avancar:
             if st.button("Avancar"):
                 st.session_state.current_idx += 1
-                st.session_state.retake_counter += 1
                 st.rerun()
     else:
-        camera_key = f"cam_{current_idx}_{st.session_state.retake_counter}"
+        camera_key = "camera_capture_main"
         picture = st.camera_input("Capture a foto desta subamostra", key=camera_key)
 
         if picture is not None:
             raw_image_bytes = picture.getvalue()
-            photo_metadata = build_photo_metadata(
-                item=item,
-                location=st.session_state.current_location,
-            )
-            image_bytes = embed_photo_metadata(raw_image_bytes, picture.type or "", photo_metadata)
-            st.image(raw_image_bytes, caption="Pre-visualizacao", use_container_width=True)
-            if st.button("Confirmar foto e avancar", type="primary"):
-                st.session_state.captures[item_key] = {
-                    "bytes": image_bytes,
-                    "mime": picture.type or "image/jpeg",
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "metadata": photo_metadata,
-                }
-                st.session_state.current_idx += 1
-                st.session_state.zip_cache = None
-                st.session_state.retake_counter += 1
-                st.rerun()
+            current_sig = hashlib.sha1(raw_image_bytes).hexdigest()
+
+            if current_sig == st.session_state.camera_last_consumed_sig:
+                st.info("Tire uma nova foto para esta subamostra antes de confirmar.")
+            else:
+                photo_metadata = build_photo_metadata(
+                    item=item,
+                    location=st.session_state.current_location,
+                )
+                image_bytes = embed_photo_metadata(raw_image_bytes, picture.type or "", photo_metadata)
+                st.image(raw_image_bytes, caption="Pre-visualizacao", use_container_width=True)
+                if st.button("Confirmar foto e avancar", type="primary"):
+                    st.session_state.captures[item_key] = {
+                        "bytes": image_bytes,
+                        "mime": picture.type or "image/jpeg",
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "metadata": photo_metadata,
+                    }
+                    st.session_state.camera_last_consumed_sig = current_sig
+                    st.session_state.current_idx += 1
+                    st.session_state.zip_cache = None
+                    st.rerun()
 
     st.button(
         "Voltar 1 item",
@@ -1002,7 +1009,6 @@ def render_capture_flow() -> None:
         on_click=lambda: st.session_state.update(
             {
                 "current_idx": max(0, current_idx - 1),
-                "retake_counter": st.session_state.retake_counter + 1,
             }
         ),
     )
