@@ -199,6 +199,34 @@ def inject_hidden_geolocation_collector() -> None:
                         input.setAttribute("capture", "environment");
                         input.setAttribute("accept", "image/*");
                     });
+
+                    // Rotulos padrao do file_uploader ("Browse files", "Drag and drop...",
+                    // "200MB per file...") confundem o operador de campo; trocamos por textos
+                    // que deixam claro que a acao e apenas "tirar foto".
+                    const dropzones = doc.querySelectorAll('[data-testid="stFileUploaderDropzone"]');
+                    dropzones.forEach((zone) => {
+                        zone.querySelectorAll("button").forEach((btn) => {
+                            const txt = (btn.textContent || "").trim().toLowerCase();
+                            if (
+                                txt.includes("browse") ||
+                                txt.includes("choose file") ||
+                                txt.includes("upload")
+                            ) {
+                                btn.textContent = "Tirar foto";
+                            }
+                        });
+                        zone.querySelectorAll("span, small, div, p").forEach((el) => {
+                            if (el.children.length > 0) {
+                                return;
+                            }
+                            const txt = (el.textContent || "").trim();
+                            if (/drag and drop/i.test(txt)) {
+                                el.textContent = "Toque para tirar a foto";
+                            } else if (/\d+\s*mb per file/i.test(txt)) {
+                                el.style.display = "none";
+                            }
+                        });
+                    });
                 }
 
                 function tuneInputBehavior() {
@@ -878,7 +906,7 @@ def render_capture_flow() -> None:
     else:
         # Key muda a cada item/retake para o widget nao reter a foto do item anterior.
         camera_key = f"cam_{current_idx}_{st.session_state.retake_counter}"
-        st.caption("Toque abaixo para abrir a camera do aparelho e tirar a foto.")
+        st.caption("Toque em 'Tirar foto' para abrir a camera do aparelho.")
         picture = st.file_uploader(
             "Capture a foto desta subamostra",
             type=["jpg", "jpeg", "png", "heic", "heif", "webp"],
@@ -893,18 +921,18 @@ def render_capture_flow() -> None:
                 location=st.session_state.current_location,
             )
             image_bytes = embed_photo_metadata(raw_image_bytes, picture.type or "", photo_metadata)
-            st.image(raw_image_bytes, caption="Pre-visualizacao", use_container_width=True)
-            if st.button("Confirmar foto e avancar", type="primary"):
-                st.session_state.captures[item_key] = {
-                    "bytes": image_bytes,
-                    "mime": picture.type or "image/jpeg",
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "metadata": photo_metadata,
-                }
-                st.session_state.current_idx += 1
-                st.session_state.zip_cache = None
-                st.session_state.retake_counter += 1
-                st.rerun()
+            # Avanca automaticamente assim que a foto chega; correcao fica disponivel
+            # via "Refazer foto atual" na proxima tela, sem exigir confirmacao manual aqui.
+            st.session_state.captures[item_key] = {
+                "bytes": image_bytes,
+                "mime": picture.type or "image/jpeg",
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "metadata": photo_metadata,
+            }
+            st.session_state.current_idx += 1
+            st.session_state.zip_cache = None
+            st.session_state.retake_counter += 1
+            st.rerun()
 
     st.button(
         "Voltar 1 item",
