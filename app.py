@@ -26,9 +26,9 @@ def init_session_state() -> None:
     defaults = {
         "cfg_ensaio": "",
         "cfg_alvo": "",
-        "cfg_repeticoes": 0,
-        "cfg_tratamentos": 0,
-        "cfg_subamostras": 0,
+        "cfg_repeticoes": "",
+        "cfg_tratamentos": "",
+        "cfg_subamostras": "",
         "auto_started_signature": "",
         "flow_started": False,
         "setup": {},
@@ -60,9 +60,9 @@ def reset_flow(keep_config: bool = True) -> None:
     if not keep_config:
         st.session_state.cfg_ensaio = ""
         st.session_state.cfg_alvo = ""
-        st.session_state.cfg_repeticoes = 0
-        st.session_state.cfg_tratamentos = 0
-        st.session_state.cfg_subamostras = 0
+        st.session_state.cfg_repeticoes = ""
+        st.session_state.cfg_tratamentos = ""
+        st.session_state.cfg_subamostras = ""
 
 
 # ---------------------------
@@ -103,6 +103,9 @@ def validate_setup(
     if repeticoes < 1:
         errors.append("Numero de Repeticoes deve ser no minimo 1.")
 
+    if repeticoes > MAX_REPETICOES:
+        errors.append(f"Numero de Repeticoes nao pode ser maior que {MAX_REPETICOES}.")
+
     if tratamentos < 1:
         errors.append("Numero de Tratamentos deve ser no minimo 1.")
 
@@ -111,6 +114,9 @@ def validate_setup(
 
     if subamostras < 1:
         errors.append("Numero de Subamostras por parcela deve ser no minimo 1.")
+
+    if subamostras > MAX_SUBAMOSTRAS:
+        errors.append(f"Numero de Subamostras por parcela nao pode ser maior que {MAX_SUBAMOSTRAS}.")
 
     total_parcelas = max(repeticoes, 0) * max(tratamentos, 0)
     total_fotos = total_parcelas * max(subamostras, 0)
@@ -126,6 +132,16 @@ def validate_setup(
 def force_uppercase_field(field_key: str) -> None:
     value = st.session_state.get(field_key, "")
     st.session_state[field_key] = value.upper()
+
+
+def sanitize_digits_field(field_key: str) -> None:
+    value = st.session_state.get(field_key, "")
+    st.session_state[field_key] = "".join(ch for ch in value if ch.isdigit())
+
+
+def parse_count_field(raw_text: str) -> int:
+    digits = raw_text.strip()
+    return int(digits) if digits else 0
 
 
 def _first_query_value(value: str | list[str] | None) -> str:
@@ -936,33 +952,31 @@ def render_setup_form() -> None:
     ensaio = ensaio_up
     alvo = alvo_up
 
-    repeticoes = int(
-        st.number_input(
-            "Numero de Repeticoes",
-            min_value=0,
-            max_value=MAX_REPETICOES,
-            step=1,
-            key="cfg_repeticoes",
-        )
+    repeticoes_text = st.text_input(
+        "Numero de Repeticoes",
+        key="cfg_repeticoes",
+        placeholder="0",
+        on_change=sanitize_digits_field,
+        args=("cfg_repeticoes",),
     )
-    tratamentos = int(
-        st.number_input(
-            "Numero de Tratamentos",
-            min_value=0,
-            max_value=MAX_TRATAMENTOS,
-            step=1,
-            key="cfg_tratamentos",
-        )
+    tratamentos_text = st.text_input(
+        "Numero de Tratamentos",
+        key="cfg_tratamentos",
+        placeholder="0",
+        on_change=sanitize_digits_field,
+        args=("cfg_tratamentos",),
     )
-    subamostras = int(
-        st.number_input(
-            "Numero de Subamostras por parcela",
-            min_value=0,
-            max_value=MAX_SUBAMOSTRAS,
-            step=1,
-            key="cfg_subamostras",
-        )
+    subamostras_text = st.text_input(
+        "Numero de Subamostras por parcela",
+        key="cfg_subamostras",
+        placeholder="0",
+        on_change=sanitize_digits_field,
+        args=("cfg_subamostras",),
     )
+
+    repeticoes = parse_count_field(repeticoes_text)
+    tratamentos = parse_count_field(tratamentos_text)
+    subamostras = parse_count_field(subamostras_text)
 
     errors, total_parcelas, total_fotos = validate_setup(
         ensaio=ensaio,
