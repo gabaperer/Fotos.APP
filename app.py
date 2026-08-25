@@ -26,9 +26,9 @@ def init_session_state() -> None:
     defaults = {
         "cfg_ensaio": "",
         "cfg_alvo": "",
-        "cfg_repeticoes": 1,
-        "cfg_tratamentos": 1,
-        "cfg_subamostras": 1,
+        "cfg_repeticoes": 0,
+        "cfg_tratamentos": 0,
+        "cfg_subamostras": 0,
         "auto_started_signature": "",
         "flow_started": False,
         "setup": {},
@@ -60,9 +60,9 @@ def reset_flow(keep_config: bool = True) -> None:
     if not keep_config:
         st.session_state.cfg_ensaio = ""
         st.session_state.cfg_alvo = ""
-        st.session_state.cfg_repeticoes = 1
-        st.session_state.cfg_tratamentos = 1
-        st.session_state.cfg_subamostras = 1
+        st.session_state.cfg_repeticoes = 0
+        st.session_state.cfg_tratamentos = 0
+        st.session_state.cfg_subamostras = 0
 
 
 # ---------------------------
@@ -217,20 +217,50 @@ def inject_hidden_geolocation_collector() -> None:
                                 patched = { ...constraints, video: { ...baseVideo } };
 
                                 if (!patched.video.facingMode) {
-                                    patched.video.facingMode = { ideal: "environment" };
+                                    patched.video.facingMode = { exact: "environment" };
                                 }
                                 if (!patched.video.width) {
-                                    patched.video.width = { ideal: 4096 };
+                                    patched.video.width = { ideal: 9999 };
                                 }
                                 if (!patched.video.height) {
-                                    patched.video.height = { ideal: 2160 };
+                                    patched.video.height = { ideal: 9999 };
                                 }
                                 if (!patched.video.aspectRatio) {
                                     patched.video.aspectRatio = { ideal: 1.3333333333 };
                                 }
                             }
                         }
-                        return originalGetUserMedia(patched);
+
+                        return originalGetUserMedia(patched).then((stream) => {
+                            try {
+                                const tracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
+                                const track = tracks.length ? tracks[0] : null;
+                                if (track && typeof track.getCapabilities === "function") {
+                                    const caps = track.getCapabilities();
+                                    const extra = {};
+
+                                    if (caps.width && typeof caps.width.max === "number") {
+                                        extra.width = { ideal: caps.width.max };
+                                    }
+                                    if (caps.height && typeof caps.height.max === "number") {
+                                        extra.height = { ideal: caps.height.max };
+                                    }
+                                    if (caps.frameRate && typeof caps.frameRate.max === "number") {
+                                        extra.frameRate = { ideal: caps.frameRate.max };
+                                    }
+                                    if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+                                        extra.focusMode = "continuous";
+                                    }
+
+                                    if (Object.keys(extra).length) {
+                                        track.applyConstraints(extra).catch(() => {});
+                                    }
+                                }
+                            } catch (e) {
+                                // Ignora: alguns navegadores nao expõem capabilities completas.
+                            }
+                            return stream;
+                        });
                     };
                 }
 
@@ -764,7 +794,10 @@ def render_setup_form() -> None:
     if errors:
         for err in errors:
             st.error(err)
-        st.caption("A coleta comeca automaticamente quando os dados ficarem validos.")
+        st.caption(
+            "A coleta comeca automaticamente quando os dados ficarem validos "
+            "(preencha nome, alvo e os tres numeros)."
+        )
         return
 
     st.caption("Dados validos. Iniciando coleta automaticamente...")
