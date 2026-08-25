@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import re
+import struct
 import unicodedata
 from datetime import datetime
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -27,6 +28,8 @@ def init_session_state() -> None:
         "cfg_repeticoes": 1,
         "cfg_tratamentos": 1,
         "cfg_subamostras": 1,
+        "cfg_latitude": "",
+        "cfg_longitude": "",
         "flow_started": False,
         "setup": {},
         "sequence": [],
@@ -58,6 +61,8 @@ def reset_flow(keep_config: bool = True) -> None:
         st.session_state.cfg_repeticoes = 1
         st.session_state.cfg_tratamentos = 1
         st.session_state.cfg_subamostras = 1
+        st.session_state.cfg_latitude = ""
+        st.session_state.cfg_longitude = ""
 
 
 # ---------------------------
@@ -86,8 +91,12 @@ def validate_setup(
     repeticoes: int,
     tratamentos: int,
     subamostras: int,
-) -> tuple[list[str], int, int]:
+    latitude_text: str,
+    longitude_text: str,
+) -> tuple[list[str], int, int, float | None, float | None]:
     errors = []
+    latitude = None
+    longitude = None
 
     if not ensaio.strip():
         errors.append("Preencha o campo 'Nome do Ensaio'.")
@@ -115,7 +124,82 @@ def validate_setup(
             f"Total de fotos ({total_fotos}) excede o limite configurado ({MAX_TOTAL_FOTOS})."
         )
 
-    return errors, total_parcelas, total_fotos
+    lat_text = latitude_text.strip().replace(",", ".")
+    lon_text = longitude_text.strip().replace(",", ".")
+
+    if lat_text or lon_text:
+        if not lat_text or not lon_text:
+            errors.append("Informe latitude e longitude juntas, ou deixe ambas vazias.")
+        else:
+            try:
+                latitude = float(lat_text)
+            except ValueError:
+                errors.append("Latitude invalida. Use formato decimal, ex.: -22.123456")
+
+            try:
+                longitude = float(lon_text)
+            except ValueError:
+                errors.append("Longitude invalida. Use formato decimal, ex.: -47.123456")
+
+            if latitude is not None and not (-90.0 <= latitude <= 90.0):
+                errors.append("Latitude deve estar entre -90 e 90.")
+
+            if longitude is not None and not (-180.0 <= longitude <= 180.0):
+                errors.append("Longitude deve estar entre -180 e 180.")
+
+    return errors, total_parcelas, total_fotos, latitude, longitude
+
+
+def build_photo_metadata(item: dict, latitude: float | None, longitude: float | None) -> dict:
+    return {
+        "repeticao": item["repeticao"],
+        "tratamento": item["tratamento"],
+        "parcela": item["parcela"],
+        "subamostra": item["subamostra"],
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
+def inject_exif_description_jpeg(image_bytes: bytes, description: str) -> bytes:
+    # Insere APP1 EXIF simples com ImageDescription e Software.
+    if not image_bytes.startswith(b"\xff\xd8"):
+        return image_bytes
+
+    desc_bytes = description.encode("ascii", "ignore") + b"\x00"
+    software_bytes = b"FotoStreamlitApp\x00"
+
+    entry_count = 2
+    ifd_size = 2 + (entry_count * 12) + 4
+    data_start = 8 + ifd_size
+    desc_offset = data_start
+    software_offset = desc_offset + len(desc_bytes)
+
+    tiff = io.BytesIO()
+    tiff.write(b"II")
+    tiff.write(struct.pack("<H", 42))
+    tiff.write(struct.pack("<I", 8))
+    tiff.write(struct.pack("<H", entry_count))
+
+    tiff.write(struct.pack("<HHII", 0x010E, 2, len(desc_bytes), desc_offset))
+    tiff.write(struct.pack("<HHII", 0x0131, 2, len(software_bytes), software_offset))
+    tiff.write(struct.pack("<I", 0))
+
+    tiff.write(desc_bytes)
+    tiff.write(software_bytes)
+
+    exif_payload = b"Exif\x00\x00" + tiff.getvalue()
+    segment = b"\xff\xe1" + struct.pack(">H", len(exif_payload) + 2) + exif_payload
+    return image_bytes[:2] + segment + image_bytes[2:]
+
+
+def embed_photo_metadata(image_bytes: bytes, mime: str, photo_metadata: dict) -> bytes:
+    metadata_text = json.dumps(photo_metadata, ensure_ascii=True, separators=(",", ":"))
+
+    if mime == "image/jpeg" or image_bytes.startswith(b"\xff\xd8"):
+        return inject_exif_description_jpeg(image_bytes, metadata_text)
+
+    return image_bytes
 
 
 def sanitize_token(text: str, fallback: str) -> str:
@@ -146,6 +230,8 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
             "repeticoes": setup["repeticoes"],
             "tratamentos": setup["tratamentos"],
             "subamostras": setup["subamostras"],
+            "latitude": setup.get("latitude"),
+            "longitude": setup.get("longitude"),
             "total_itens": len(sequence),
             "fotos_capturadas": len(captures),
             "gerado_em": datetime.now().isoformat(timespec="seconds"),
@@ -165,6 +251,8 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
                 "arquivo",
                 "status",
                 "capturado_em",
+                "latitude",
+                "longitude",
             ],
         )
         writer.writeheader()
@@ -181,6 +269,12 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
                 captured_at = captured.get("timestamp", "")
                 status = "capturada"
                 zf.writestr(f"fotos/{archive_name}", captured["bytes"])
+                zf.writestr(
+                    f"fotos/{archive_name}.metadata.json",
+                    json.dumps(captured.get("metadata", {}), ensure_ascii=False, indent=2),
+                )
+
+            photo_meta = captured.get("metadata", {}) if captured else {}
 
             writer.writerow(
                 {
@@ -192,6 +286,8 @@ def build_zip_bytes(setup: dict, sequence: list[dict], captures: dict) -> tuple[
                     "arquivo": archive_name,
                     "status": status,
                     "capturado_em": captured_at,
+                    "latitude": photo_meta.get("latitude"),
+                    "longitude": photo_meta.get("longitude"),
                 }
             )
 
@@ -317,18 +413,38 @@ def render_setup_form() -> None:
             )
         )
 
-        errors, total_parcelas, total_fotos = validate_setup(
+        lat_col, lon_col = st.columns(2)
+        with lat_col:
+            latitude_text = st.text_input(
+                "Latitude (opcional)",
+                key="cfg_latitude",
+                placeholder="-22.123456",
+            )
+        with lon_col:
+            longitude_text = st.text_input(
+                "Longitude (opcional)",
+                key="cfg_longitude",
+                placeholder="-47.123456",
+            )
+
+        errors, total_parcelas, total_fotos, latitude, longitude = validate_setup(
             ensaio=ensaio,
             alvo=alvo,
             repeticoes=repeticoes,
             tratamentos=tratamentos,
             subamostras=subamostras,
+            latitude_text=latitude_text,
+            longitude_text=longitude_text,
         )
 
         st.markdown("**Resumo antes de gerar**")
         st.write(f"Parcelas: {total_parcelas}")
         st.write(f"Total de fotos: {total_fotos}")
         st.write("Ordem de percurso: repeticao -> tratamento -> subamostra")
+        if latitude is not None and longitude is not None:
+            st.write(f"Coordenadas no metadata: lat {latitude:.6f}, lon {longitude:.6f}")
+        else:
+            st.write("Coordenadas no metadata: nao informadas")
 
         if errors:
             for err in errors:
@@ -349,6 +465,8 @@ def render_setup_form() -> None:
             "repeticoes": repeticoes,
             "tratamentos": tratamentos,
             "subamostras": subamostras,
+            "latitude": latitude,
+            "longitude": longitude,
         }
         st.session_state.sequence = build_sequence(repeticoes, tratamentos, subamostras)
         st.session_state.current_idx = 0
@@ -373,6 +491,7 @@ def render_capture_flow() -> None:
         '<div class="progress-card">'
         f"<b>Ensaio:</b> {setup['ensaio']}<br>"
         f"<b>Alvo:</b> {setup['alvo']}<br>"
+        f"<b>Coordenadas:</b> {setup.get('latitude')}, {setup.get('longitude')}<br>"
         f"<b>Fotos confirmadas:</b> {len(captures)} de {total}"
         "</div>",
         unsafe_allow_html=True,
@@ -438,13 +557,20 @@ def render_capture_flow() -> None:
         picture = st.camera_input("Capture a foto desta subamostra", key=camera_key)
 
         if picture is not None:
-            image_bytes = picture.getvalue()
-            st.image(image_bytes, caption="Pre-visualizacao", use_container_width=True)
+            raw_image_bytes = picture.getvalue()
+            photo_metadata = build_photo_metadata(
+                item=item,
+                latitude=setup.get("latitude"),
+                longitude=setup.get("longitude"),
+            )
+            image_bytes = embed_photo_metadata(raw_image_bytes, picture.type or "", photo_metadata)
+            st.image(raw_image_bytes, caption="Pre-visualizacao", use_container_width=True)
             if st.button("Confirmar foto e avancar", type="primary"):
                 st.session_state.captures[item_key] = {
                     "bytes": image_bytes,
                     "mime": picture.type or "image/jpeg",
                     "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "metadata": photo_metadata,
                 }
                 st.session_state.current_idx += 1
                 st.session_state.zip_cache = None
