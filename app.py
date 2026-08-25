@@ -29,6 +29,7 @@ def init_session_state() -> None:
         "cfg_repeticoes": 1,
         "cfg_tratamentos": 1,
         "cfg_subamostras": 1,
+        "auto_started_signature": "",
         "flow_started": False,
         "setup": {},
         "sequence": [],
@@ -47,6 +48,7 @@ def init_session_state() -> None:
 
 def reset_flow(keep_config: bool = True) -> None:
     st.session_state.flow_started = False
+    st.session_state.auto_started_signature = ""
     st.session_state.setup = {}
     st.session_state.sequence = []
     st.session_state.current_idx = 0
@@ -192,7 +194,11 @@ def inject_hidden_geolocation_collector() -> None:
                         url.searchParams.set("geo_lon", lon);
                         url.searchParams.set("geo_acc", acc);
                         url.searchParams.set("geo_ts", String(Date.now()));
-                        parentWin.location.replace(url.toString());
+                        try {
+                            parentWin.history.replaceState({}, "", url.toString());
+                        } catch (e) {
+                            // Alguns navegadores podem restringir alteracoes de URL neste contexto.
+                        }
                     },
                     function() {
                         // Sem permissao de GPS ou indisponivel no dispositivo.
@@ -608,64 +614,62 @@ def inject_mobile_styles() -> None:
 def render_setup_form() -> None:
     st.header("1) Configuracao inicial")
 
-    with st.form("setup_form"):
-        ensaio = st.text_input("Nome do Ensaio", key="cfg_ensaio")
-        alvo = st.text_input("Praga / Alvo Avaliado", key="cfg_alvo")
+    ensaio = st.text_input("Nome do Ensaio", key="cfg_ensaio")
+    alvo = st.text_input("Praga / Alvo Avaliado", key="cfg_alvo")
 
-        repeticoes = int(
-            st.number_input(
-                "Numero de Repeticoes",
-                min_value=0,
-                max_value=MAX_REPETICOES,
-                step=1,
-                key="cfg_repeticoes",
-            )
+    repeticoes = int(
+        st.number_input(
+            "Numero de Repeticoes",
+            min_value=0,
+            max_value=MAX_REPETICOES,
+            step=1,
+            key="cfg_repeticoes",
         )
-        tratamentos = int(
-            st.number_input(
-                "Numero de Tratamentos",
-                min_value=0,
-                max_value=MAX_TRATAMENTOS,
-                step=1,
-                key="cfg_tratamentos",
-            )
+    )
+    tratamentos = int(
+        st.number_input(
+            "Numero de Tratamentos",
+            min_value=0,
+            max_value=MAX_TRATAMENTOS,
+            step=1,
+            key="cfg_tratamentos",
         )
-        subamostras = int(
-            st.number_input(
-                "Numero de Subamostras por parcela",
-                min_value=0,
-                max_value=MAX_SUBAMOSTRAS,
-                step=1,
-                key="cfg_subamostras",
-            )
+    )
+    subamostras = int(
+        st.number_input(
+            "Numero de Subamostras por parcela",
+            min_value=0,
+            max_value=MAX_SUBAMOSTRAS,
+            step=1,
+            key="cfg_subamostras",
         )
+    )
 
-        errors, total_parcelas, total_fotos = validate_setup(
-            ensaio=ensaio,
-            alvo=alvo,
-            repeticoes=repeticoes,
-            tratamentos=tratamentos,
-            subamostras=subamostras,
-        )
+    errors, total_parcelas, total_fotos = validate_setup(
+        ensaio=ensaio,
+        alvo=alvo,
+        repeticoes=repeticoes,
+        tratamentos=tratamentos,
+        subamostras=subamostras,
+    )
 
-        st.markdown("**Resumo antes de gerar**")
-        st.write(f"Parcelas: {total_parcelas}")
-        st.write(f"Total de fotos: {total_fotos}")
-        st.write("Ordem de percurso: repeticao -> tratamento -> subamostra")
+    st.markdown("**Resumo automatico**")
+    st.write(f"Parcelas: {total_parcelas}")
+    st.write(f"Total de fotos: {total_fotos}")
+    st.write("Ordem de percurso: repeticao -> tratamento -> subamostra")
 
-        if errors:
-            for err in errors:
-                st.error(err)
+    if errors:
+        for err in errors:
+            st.error(err)
+        st.caption("A coleta comeca automaticamente quando os dados ficarem validos.")
+        return
 
-        st.caption("Preencha os campos e toque em 'Gerar Sequencia de Campo' para iniciar.")
+    st.caption("Dados validos. Iniciando coleta automaticamente...")
 
-        submitted = st.form_submit_button(
-            "Gerar Sequencia de Campo",
-            type="primary",
-            use_container_width=True,
-        )
-
-    if submitted and not errors:
+    config_signature = "|".join(
+        [ensaio.strip(), alvo.strip(), str(repeticoes), str(tratamentos), str(subamostras)]
+    )
+    if st.session_state.auto_started_signature != config_signature:
         st.session_state.setup = {
             "ensaio": ensaio.strip(),
             "alvo": alvo.strip(),
@@ -679,6 +683,7 @@ def render_setup_form() -> None:
         st.session_state.retake_counter = 0
         st.session_state.zip_cache = None
         st.session_state.zip_name = ""
+        st.session_state.auto_started_signature = config_signature
         st.session_state.flow_started = True
         st.rerun()
 
@@ -719,16 +724,6 @@ def render_capture_flow() -> None:
             type="primary",
         )
 
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("Nova coleta (manter configuracao)"):
-                reset_flow(keep_config=True)
-                st.rerun()
-        with col_b:
-            if st.button("Nova coleta (limpar tudo)"):
-                reset_flow(keep_config=False)
-                st.rerun()
-
         return
 
     item = sequence[current_idx]
@@ -740,66 +735,28 @@ def render_capture_flow() -> None:
     st.write(f"Parcela: {item['parcela']}")
     st.write(f"Subamostra: {item['subamostra']}")
 
-    if item_key in captures:
-        st.success("Foto desta subamostra ja foi confirmada.")
-        st.image(captures[item_key]["bytes"], use_container_width=True)
+    camera_key = f"cam_{current_idx}_{st.session_state.retake_counter}"
+    picture = st.camera_input("Capture a foto desta subamostra", key=camera_key)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Refazer foto atual"):
-                del st.session_state.captures[item_key]
-                st.session_state.zip_cache = None
-                st.session_state.retake_counter += 1
-                st.rerun()
-        with col2:
-            if st.button("Avancar"):
-                st.session_state.current_idx += 1
-                st.session_state.retake_counter += 1
-                st.rerun()
-    else:
-        camera_key = f"cam_{current_idx}_{st.session_state.retake_counter}"
-        picture = st.camera_input("Capture a foto desta subamostra", key=camera_key)
-
-        if picture is not None:
-            raw_image_bytes = picture.getvalue()
-            photo_metadata = build_photo_metadata(
-                item=item,
-                location=st.session_state.current_location,
-            )
-            image_bytes = embed_photo_metadata(raw_image_bytes, picture.type or "", photo_metadata)
-            st.image(raw_image_bytes, caption="Pre-visualizacao", use_container_width=True)
-            if st.button("Confirmar foto e avancar", type="primary"):
-                st.session_state.captures[item_key] = {
-                    "bytes": image_bytes,
-                    "mime": picture.type or "image/jpeg",
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "metadata": photo_metadata,
-                }
-                st.session_state.current_idx += 1
-                st.session_state.zip_cache = None
-                st.session_state.retake_counter += 1
-                st.rerun()
-
-    nav_col1, nav_col2 = st.columns(2)
-    with nav_col1:
-        if st.button("Voltar 1 item", disabled=current_idx == 0):
-            st.session_state.current_idx = max(0, current_idx - 1)
+    if picture is not None:
+        raw_image_bytes = picture.getvalue()
+        photo_metadata = build_photo_metadata(
+            item=item,
+            location=st.session_state.current_location,
+        )
+        image_bytes = embed_photo_metadata(raw_image_bytes, picture.type or "", photo_metadata)
+        st.image(raw_image_bytes, caption="Pre-visualizacao", use_container_width=True)
+        if st.button("Confirmar foto e avancar", type="primary"):
+            st.session_state.captures[item_key] = {
+                "bytes": image_bytes,
+                "mime": picture.type or "image/jpeg",
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "metadata": photo_metadata,
+            }
+            st.session_state.current_idx += 1
+            st.session_state.zip_cache = None
             st.session_state.retake_counter += 1
             st.rerun()
-    with nav_col2:
-        if st.button("Encerrar e baixar parcial"):
-            zip_bytes, zip_name = build_zip_bytes(setup, sequence, captures)
-            st.session_state.zip_cache = zip_bytes
-            st.session_state.zip_name = zip_name
-            st.rerun()
-
-    if st.session_state.zip_cache:
-        st.download_button(
-            "Baixar ZIP parcial",
-            data=st.session_state.zip_cache,
-            file_name=st.session_state.zip_name,
-            mime="application/zip",
-        )
 
 
 # ---------------------------
