@@ -388,16 +388,32 @@ def inject_hidden_geolocation_collector() -> None:
                     }
                 }
 
+                function findVideoAtPoint(doc, x, y) {
+                    const videos = Array.from(doc.querySelectorAll("video"));
+                    for (const video of videos) {
+                        const rect = video.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) {
+                            continue;
+                        }
+                        if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                            return video;
+                        }
+                    }
+                    return null;
+                }
+
                 function attachTapToFocus(targetWin) {
                     if (targetWin.__fotoAppTapFocusAttached) {
                         return;
                     }
                     targetWin.__fotoAppTapFocusAttached = true;
 
+                    // Detecta pelo ponto tocado (nao pelo alvo do evento): overlays do proprio
+                    // widget de camera podem capturar o toque antes do <video>.
                     targetWin.document.addEventListener(
-                        "pointerdown",
+                        "click",
                         async (evt) => {
-                            const video = evt.target && evt.target.closest ? evt.target.closest("video") : null;
+                            const video = findVideoAtPoint(targetWin.document, evt.clientX, evt.clientY);
                             if (!video || !video.srcObject) {
                                 return;
                             }
@@ -425,18 +441,27 @@ def inject_hidden_geolocation_collector() -> None:
                                 setTimeout(() => marker.remove(), 400);
                             }, 500);
 
+                            const caps =
+                                typeof track.getCapabilities === "function" ? track.getCapabilities() : {};
+                            const supportsContinuous =
+                                Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous");
+
+                            // Nunca usar "single-shot": trava o foco na primeira tentativa e pode
+                            // deixar a imagem permanentemente desfocada se o ponto falhar.
                             try {
-                                const caps =
-                                    typeof track.getCapabilities === "function" ? track.getCapabilities() : {};
                                 const advanced = [{ pointsOfInterest: [{ x: relX, y: relY }] }];
-                                // Nunca usar "single-shot": trava o foco na primeira tentativa e
-                                // pode deixar a imagem permanentemente desfocada se o ponto falhar.
-                                if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+                                if (supportsContinuous) {
                                     advanced.push({ focusMode: "continuous" });
                                 }
-                                await track.applyConstraints({ advanced }).catch(() => {});
+                                await track.applyConstraints({ advanced });
                             } catch (e) {
-                                // Ajuste de foco por toque nao suportado neste navegador/dispositivo.
+                                if (supportsContinuous) {
+                                    try {
+                                        await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+                                    } catch (e2) {
+                                        // Ajuste de foco por toque nao suportado neste navegador/dispositivo.
+                                    }
+                                }
                             }
                         },
                         { passive: true }
