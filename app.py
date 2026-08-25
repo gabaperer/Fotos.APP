@@ -406,12 +406,69 @@ def inject_hidden_geolocation_collector() -> None:
                     }
                 }
 
+                function attachTapToFocus(targetWin) {
+                    if (targetWin.__fotoAppTapFocusAttached) {
+                        return;
+                    }
+                    targetWin.__fotoAppTapFocusAttached = true;
+
+                    targetWin.document.addEventListener(
+                        "pointerdown",
+                        async (evt) => {
+                            const video = evt.target && evt.target.closest ? evt.target.closest("video") : null;
+                            if (!video || !video.srcObject) {
+                                return;
+                            }
+
+                            const track = video.srcObject.getVideoTracks
+                                ? video.srcObject.getVideoTracks()[0]
+                                : null;
+                            if (!track || typeof track.applyConstraints !== "function") {
+                                return;
+                            }
+
+                            const rect = video.getBoundingClientRect();
+                            const relX = Math.min(Math.max((evt.clientX - rect.left) / rect.width, 0), 1);
+                            const relY = Math.min(Math.max((evt.clientY - rect.top) / rect.height, 0), 1);
+
+                            const marker = targetWin.document.createElement("div");
+                            marker.style.cssText =
+                                "position:fixed;width:56px;height:56px;border:3px solid #fbbf24;" +
+                                "border-radius:50%;pointer-events:none;z-index:999999;" +
+                                "transform:translate(-50%,-50%);transition:opacity 0.4s ease;" +
+                                `left:${evt.clientX}px;top:${evt.clientY}px;`;
+                            targetWin.document.body.appendChild(marker);
+                            setTimeout(() => {
+                                marker.style.opacity = "0";
+                                setTimeout(() => marker.remove(), 400);
+                            }, 500);
+
+                            try {
+                                const caps =
+                                    typeof track.getCapabilities === "function" ? track.getCapabilities() : {};
+                                const advanced = [{ pointsOfInterest: [{ x: relX, y: relY }] }];
+                                if (Array.isArray(caps.focusMode) && caps.focusMode.includes("single-shot")) {
+                                    advanced.push({ focusMode: "single-shot" });
+                                } else if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+                                    advanced.push({ focusMode: "continuous" });
+                                }
+                                await track.applyConstraints({ advanced }).catch(() => {});
+                            } catch (e) {
+                                // Ajuste de foco por toque nao suportado neste navegador/dispositivo.
+                            }
+                        },
+                        { passive: true }
+                    );
+                }
+
                 try {
                     patchMediaConstraints(parentWin);
                     patchMediaConstraints(window);
+                    attachTapToFocus(parentWin);
 
-                    for (let i = 0; i < 20; i += 1) {
-                        setTimeout(() => enforceRearCameraOnVideos(parentWin), i * 500);
+                    if (!parentWin.__fotoAppRearIntervalStarted) {
+                        parentWin.__fotoAppRearIntervalStarted = true;
+                        parentWin.setInterval(() => enforceRearCameraOnVideos(parentWin), 700);
                     }
 
                     const rearObserver = new MutationObserver(() => {
