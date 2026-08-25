@@ -328,21 +328,29 @@ def inject_hidden_geolocation_collector() -> None:
                     setTimeout(tuneInputBehavior, i * 350);
                 }
 
-                if (!navigator.geolocation) {
+                const geoApi =
+                    (parentWin.navigator && parentWin.navigator.geolocation)
+                    || navigator.geolocation;
+
+                if (!geoApi) {
                     return;
                 }
 
                 const now = Date.now();
                 const throttleKey = "foto_streamlit_geo_last_try_ms";
                 const lastTry = Number(parentWin.localStorage.getItem(throttleKey) || "0");
+                const existingUrl = new URL(parentWin.location.href);
+                const hasGeoInUrl =
+                    existingUrl.searchParams.has("geo_lat")
+                    && existingUrl.searchParams.has("geo_lon");
 
-                if (now - lastTry < 7000) {
+                if (hasGeoInUrl && now - lastTry < 7000) {
                     return;
                 }
 
                 parentWin.localStorage.setItem(throttleKey, String(now));
 
-                navigator.geolocation.getCurrentPosition(
+                geoApi.getCurrentPosition(
                     function(pos) {
                         const lat = pos.coords.latitude.toFixed(7);
                         const lon = pos.coords.longitude.toFixed(7);
