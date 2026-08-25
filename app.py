@@ -796,24 +796,19 @@ def render_setup_form() -> None:
     if errors:
         for err in errors:
             st.error(err)
-        st.caption(
-            "A coleta comeca automaticamente quando os dados ficarem validos "
-            "(preencha nome, alvo e os tres numeros)."
+
+    start_col_info, start_col_btn = st.columns([2, 1])
+    with start_col_info:
+        st.caption("A coleta so inicia quando voce tocar em 'Iniciar avaliacao'.")
+    with start_col_btn:
+        should_start = st.button(
+            "Iniciar avaliacao",
+            type="primary",
+            disabled=bool(errors),
+            use_container_width=True,
         )
-        return
 
-    st.caption("Dados validos. Iniciando coleta automaticamente...")
-
-    config_signature = "|".join(
-        [
-            ensaio.strip().upper(),
-            alvo.strip().upper(),
-            str(repeticoes),
-            str(tratamentos),
-            str(subamostras),
-        ]
-    )
-    if st.session_state.auto_started_signature != config_signature:
+    if should_start and not errors:
         st.session_state.setup = {
             "ensaio": ensaio.strip().upper(),
             "alvo": alvo.strip().upper(),
@@ -827,7 +822,7 @@ def render_setup_form() -> None:
         st.session_state.retake_counter = 0
         st.session_state.zip_cache = None
         st.session_state.zip_name = ""
-        st.session_state.auto_started_signature = config_signature
+        st.session_state.auto_started_signature = ""
         st.session_state.flow_started = True
         st.rerun()
 
