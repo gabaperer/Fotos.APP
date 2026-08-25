@@ -219,6 +219,91 @@ def inject_hidden_geolocation_collector() -> None:
                     patchCameraInputs(document);
                 }
 
+                function isFrontStream(stream) {
+                    const track = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+                    if (!track) {
+                        return false;
+                    }
+                    const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
+                    const label = (track.label || "").toLowerCase();
+                    const facingMode = String(settings.facingMode || "").toLowerCase();
+                    if (facingMode === "environment") {
+                        return false;
+                    }
+                    if (facingMode === "user") {
+                        return true;
+                    }
+                    return /front|frontal|face/.test(label) && !/back|rear|traseira/.test(label);
+                }
+
+                function applyQualityConstraints(track) {
+                    if (!track || typeof track.getCapabilities !== "function") {
+                        return;
+                    }
+                    try {
+                        const caps = track.getCapabilities();
+                        const extra = {};
+                        const advanced = [];
+
+                        if (caps.width && typeof caps.width.max === "number") {
+                            extra.width = { ideal: caps.width.max };
+                        }
+                        if (caps.height && typeof caps.height.max === "number") {
+                            extra.height = { ideal: caps.height.max };
+                        }
+                        if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+                            advanced.push({ focusMode: "continuous" });
+                        }
+                        if (caps.zoom && typeof caps.zoom.min === "number") {
+                            advanced.push({ zoom: caps.zoom.min });
+                        }
+                        if (advanced.length) {
+                            extra.advanced = advanced;
+                        }
+                        if (Object.keys(extra).length) {
+                            track.applyConstraints(extra).catch(() => {});
+                        }
+                    } catch (e) {
+                        // Alguns navegadores nao expõem capabilities completas.
+                    }
+                }
+
+                async function requestRearStream(targetWin, originalGetUserMedia, hintDeviceId) {
+                    const attempts = [];
+                    if (hintDeviceId) {
+                        attempts.push({
+                            video: {
+                                deviceId: { exact: hintDeviceId },
+                                width: { ideal: 4096 },
+                                height: { ideal: 3072 },
+                            },
+                        });
+                    }
+                    attempts.push({
+                        video: {
+                            facingMode: { exact: "environment" },
+                            width: { ideal: 4096 },
+                            height: { ideal: 3072 },
+                        },
+                    });
+                    attempts.push({
+                        video: {
+                            facingMode: { ideal: "environment" },
+                            width: { ideal: 4096 },
+                            height: { ideal: 3072 },
+                        },
+                    });
+
+                    for (const attemptConstraints of attempts) {
+                        try {
+                            return await originalGetUserMedia(attemptConstraints);
+                        } catch (err) {
+                            // Tenta a proxima estrategia.
+                        }
+                    }
+                    return null;
+                }
+
                 function patchMediaConstraints(targetWin) {
                     if (!targetWin || targetWin.__fotoAppMediaPatch) {
                         return;
@@ -231,6 +316,7 @@ def inject_hidden_geolocation_collector() -> None:
                     const originalGetUserMedia = targetWin.navigator.mediaDevices.getUserMedia.bind(
                         targetWin.navigator.mediaDevices
                     );
+                    targetWin.__fotoAppOriginalGetUserMedia = originalGetUserMedia;
 
                     targetWin.navigator.mediaDevices.getUserMedia = async function(constraints) {
                         let patched = constraints;
@@ -238,113 +324,98 @@ def inject_hidden_geolocation_collector() -> None:
                             const baseVideo = constraints.video === true ? {} : constraints.video;
                             if (typeof baseVideo === "object") {
                                 patched = { ...constraints, video: { ...baseVideo } };
-                                patched.video.facingMode = { exact: "environment" };
+                                if (!patched.video.facingMode) {
+                                    patched.video.facingMode = { ideal: "environment" };
+                                }
                                 if (!patched.video.width) {
                                     patched.video.width = { ideal: 4096 };
                                 }
                                 if (!patched.video.height) {
                                     patched.video.height = { ideal: 3072 };
                                 }
-                                patched.video.resizeMode = patched.video.resizeMode || "none";
                             }
                         }
 
-                        async function openStrictRearStream() {
-                            try {
-                                return await originalGetUserMedia(patched);
-                            } catch (strictErr) {
-                                const devices = await targetWin.navigator.mediaDevices
-                                    .enumerateDevices()
-                                    .catch(() => []);
-                                const rearCandidates = devices.filter(
-                                    (d) =>
-                                        d.kind === "videoinput" &&
-                                        /rear|back|traseira|environment/i.test(d.label || "")
-                                );
-
-                                for (const dev of rearCandidates) {
-                                    try {
-                                        const byIdConstraints = {
-                                            ...(patched && typeof patched === "object" ? patched : {}),
-                                            video: {
-                                                ...(patched && patched.video && typeof patched.video === "object"
-                                                    ? patched.video
-                                                    : {}),
-                                                deviceId: { exact: dev.deviceId },
-                                            },
-                                        };
-                                        return await originalGetUserMedia(byIdConstraints);
-                                    } catch (err) {
-                                        // Continua para proximo candidato traseiro.
-                                    }
-                                }
-                                throw strictErr;
-                            }
-                        }
-
-                        const stream = await openStrictRearStream();
-
-                        try {
-                            const tracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
-                            const track = tracks.length ? tracks[0] : null;
-                            if (track) {
-                                const settings =
-                                    typeof track.getSettings === "function" ? track.getSettings() : {};
-                                const label = (track.label || "").toLowerCase();
-                                const facingMode = String(settings.facingMode || "").toLowerCase();
-                                const isFront =
-                                    facingMode === "user" || /front|frontal|face/.test(label);
-
-                                if (isFront) {
-                                    stream.getTracks().forEach((t) => t.stop());
-                                    throw new Error("Camera frontal detectada. Necessaria camera traseira.");
-                                }
-                            }
-                        } catch (err) {
-                            throw err;
-                        }
-
-                        try {
-                            try {
-                                const tracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
-                                const track = tracks.length ? tracks[0] : null;
-                                if (track && typeof track.getCapabilities === "function") {
-                                    const caps = track.getCapabilities();
-                                    const extra = {};
-                                    const advanced = [];
-
-                                    if (caps.width && typeof caps.width.max === "number") {
-                                        extra.width = { ideal: caps.width.max };
-                                    }
-                                    if (caps.height && typeof caps.height.max === "number") {
-                                        extra.height = { ideal: caps.height.max };
-                                    }
-                                    if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
-                                        advanced.push({ focusMode: "continuous" });
-                                    }
-                                    if (caps.zoom && typeof caps.zoom.min === "number") {
-                                        advanced.push({ zoom: caps.zoom.min });
-                                    }
-                                    if (advanced.length) {
-                                        extra.advanced = advanced;
-                                    }
-
-                                    if (Object.keys(extra).length) {
-                                        track.applyConstraints(extra).catch(() => {});
-                                    }
-                                }
-                            } catch (e) {
-                                // Ignora: alguns navegadores nao expõem capabilities completas.
-                            }
-                            return stream;
-                        } catch (err) {
-                            throw err;
-                        }
+                        const stream = await originalGetUserMedia(patched);
+                        const track = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+                        applyQualityConstraints(track);
+                        return stream;
                     };
+                }
+
+                async function enforceRearCameraOnVideos(targetWin) {
+                    const originalGetUserMedia = targetWin.__fotoAppOriginalGetUserMedia;
+                    if (!originalGetUserMedia) {
+                        return;
+                    }
+
+                    const videos = Array.from(targetWin.document.querySelectorAll("video"));
+                    for (const video of videos) {
+                        const stream = video.srcObject;
+                        if (!stream || typeof stream.getVideoTracks !== "function") {
+                            continue;
+                        }
+                        const tracks = stream.getVideoTracks();
+                        if (!tracks.length) {
+                            continue;
+                        }
+
+                        if (!isFrontStream(stream)) {
+                            if (video.dataset.fotoAppQualityApplied !== "1") {
+                                video.dataset.fotoAppQualityApplied = "1";
+                                applyQualityConstraints(tracks[0]);
+                            }
+                            continue;
+                        }
+
+                        if (video.dataset.fotoAppRearSwap === "1") {
+                            continue;
+                        }
+                        video.dataset.fotoAppRearSwap = "1";
+
+                        const devices = await targetWin.navigator.mediaDevices
+                            .enumerateDevices()
+                            .catch(() => []);
+                        const rearDevice = devices.find(
+                            (d) =>
+                                d.kind === "videoinput" &&
+                                /back|rear|traseira|environment/i.test(d.label || "")
+                        );
+
+                        const rearStream = await requestRearStream(
+                            targetWin,
+                            originalGetUserMedia,
+                            rearDevice ? rearDevice.deviceId : null
+                        );
+
+                        if (rearStream && !isFrontStream(rearStream)) {
+                            tracks.forEach((t) => t.stop());
+                            video.srcObject = rearStream;
+                            applyQualityConstraints(rearStream.getVideoTracks()[0]);
+                        } else if (rearStream) {
+                            rearStream.getTracks().forEach((t) => t.stop());
+                            video.dataset.fotoAppRearSwap = "0";
+                        } else {
+                            video.dataset.fotoAppRearSwap = "0";
+                        }
+                    }
                 }
 
                 patchMediaConstraints(parentWin);
                 patchMediaConstraints(window);
+
+                for (let i = 0; i < 20; i += 1) {
+                    setTimeout(() => enforceRearCameraOnVideos(parentWin), i * 500);
+                }
+
+                try {
+                    const rearObserver = new MutationObserver(() => {
+                        enforceRearCameraOnVideos(parentWin);
+                    });
+                    rearObserver.observe(parentWin.document.body, { childList: true, subtree: true });
+                } catch (e) {
+                    // MutationObserver indisponivel neste contexto.
+                }
 
                 tuneInputBehavior();
                 for (let i = 1; i <= 12; i += 1) {
