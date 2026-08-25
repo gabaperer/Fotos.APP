@@ -260,9 +260,8 @@ def inject_hidden_geolocation_collector() -> None:
                         if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
                             advanced.push({ focusMode: "continuous" });
                         }
-                        if (caps.zoom && typeof caps.zoom.min === "number") {
-                            advanced.push({ zoom: caps.zoom.min });
-                        }
+                        // Nao forcar zoom: em celulares com multiplas lentes, zoom minimo pode
+                        // trocar para a lente ultra-wide, piorando foco de perto e gerando distorcao.
                         if (advanced.length) {
                             track.applyConstraints({ advanced }).catch(() => {});
                         }
